@@ -24,7 +24,10 @@ class VisionPaint:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self.camera = Camera(cfg.camera)
-        self.tracker = HandTracker(cfg.tracker, MODEL_PATH, mirrored=cfg.camera.mirror)
+        # The model is loaded inside run(), after the camera is open: loading it
+        # first means a couple of seconds and a wall of MediaPipe logs before a
+        # missing-camera message the user could have had immediately.
+        self.tracker: Optional[HandTracker] = None
         self.state: Optional[AppState] = None
         self.dispatcher: Optional[CommandDispatcher] = None
         self.show_help = False
@@ -37,67 +40,73 @@ class VisionPaint:
         self.state.notify("Press h for the gesture list", "good")
 
     def run(self) -> int:
-        with self.camera, self.tracker:
-            width, height = self.camera.size
-            self._init_state(width, height)
-            assert self.state and self.dispatcher
+        with self.camera:
+            self.tracker = HandTracker(self.cfg.tracker, MODEL_PATH, mirrored=self.cfg.camera.mirror)
+            with self.tracker:
+                return self._loop()
 
-            cv2.namedWindow(self.cfg.window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.cfg.window_name, width, height)
+    def _loop(self) -> int:
+        assert self.tracker is not None
+        width, height = self.camera.size
+        self._init_state(width, height)
+        assert self.state and self.dispatcher
 
-            last_stamp = -1.0
-            while self.state.running:
-                frame, stamp = self.camera.read()
-                if frame is None:
-                    time.sleep(0.005)
-                    continue
-                if stamp == last_stamp:
-                    # No new frame yet; keep the UI responsive without redoing
-                    # inference on an image we have already processed.
-                    if self._handle_keys() is False:
-                        break
-                    continue
-                last_stamp = stamp
+        cv2.namedWindow(self.cfg.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.cfg.window_name, width, height)
 
-                started = time.perf_counter()
-                h, w = frame.shape[:2]
-                self.state.canvases.resize(w, h)
-                aspect = w / h
-
-                hands_raw = self.tracker.process(frame, stamp)
-                hands = [feat.extract(hand, self.cfg.gesture, aspect) for hand in hands_raw]
-
-                self.dispatcher.last_camera_frame = frame
-                self.dispatcher.update(hands, stamp)
-
-                canvas = self.state.canvas
-                background = canvas.background_frame(frame)
-                composed = canvas.composite(background)
-
-                if self.cfg.show_landmarks:
-                    draw_landmarks(composed, hands)
-                draw_cursor(
-                    composed, self.dispatcher.cursor, self.state.color,
-                    self.state.brush_size, self.dispatcher.last_state.gesture.value == "draw",
-                )
-
-                self._fps.append(time.perf_counter() - started)
-                fps = 1.0 / max(np.mean(self._fps), 1e-6)
-                draw_hud(
-                    composed, self.state,
-                    self.dispatcher.last_state.gesture.value if self.dispatcher.last_state.active else "",
-                    self.dispatcher.last_state.confidence, fps,
-                    self.dispatcher.dwell_progress, self.dispatcher.dwell_label,
-                    self.dispatcher.ranking,
-                )
-                if self.show_help:
-                    draw_help(composed)
-
-                cv2.imshow(self.cfg.window_name, composed)
+        last_stamp = -1.0
+        while self.state.running:
+            frame, stamp = self.camera.read()
+            if frame is None:
+                time.sleep(0.005)
+                continue
+            if stamp == last_stamp:
+                # No new frame yet; keep the UI responsive without redoing
+                # inference on an image we have already processed.
                 if self._handle_keys() is False:
                     break
+                continue
+            last_stamp = stamp
 
-            cv2.destroyAllWindows()
+            started = time.perf_counter()
+            h, w = frame.shape[:2]
+            self.state.canvases.resize(w, h)
+            aspect = w / h
+
+            hands_raw = self.tracker.process(frame, stamp)
+            hands = [feat.extract(hand, self.cfg.gesture, aspect) for hand in hands_raw]
+
+            self.dispatcher.last_camera_frame = frame
+            self.dispatcher.update(hands, stamp)
+
+            canvas = self.state.canvas
+            background = canvas.background_frame(frame)
+            composed = canvas.composite(background)
+
+            if self.cfg.show_landmarks:
+                draw_landmarks(composed, hands)
+            draw_cursor(
+                composed, self.dispatcher.cursor, self.state.color,
+                self.state.brush_size, self.dispatcher.last_state.gesture.value == "draw",
+            )
+
+            self._fps.append(time.perf_counter() - started)
+            fps = 1.0 / max(np.mean(self._fps), 1e-6)
+            draw_hud(
+                composed, self.state,
+                self.dispatcher.last_state.gesture.value if self.dispatcher.last_state.active else "",
+                self.dispatcher.last_state.confidence, fps,
+                self.dispatcher.dwell_progress, self.dispatcher.dwell_label,
+                self.dispatcher.ranking,
+            )
+            if self.show_help:
+                draw_help(composed)
+
+            cv2.imshow(self.cfg.window_name, composed)
+            if self._handle_keys() is False:
+                break
+
+        cv2.destroyAllWindows()
         return 0
 
     def _handle_keys(self) -> Optional[bool]:

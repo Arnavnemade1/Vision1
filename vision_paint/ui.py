@@ -181,7 +181,7 @@ HELP_LINES = (
 
 def draw_help(frame: np.ndarray) -> None:
     h, w = frame.shape[:2]
-    pw, ph = 430, 26 * len(HELP_LINES) + 60
+    pw, ph = 430, 26 * len(HELP_LINES) + 92
     x, y = (w - pw) // 2, (h - ph) // 2
     _panel(frame, x, y, pw, ph, 0.85)
     _text(frame, "GESTURES", x + 20, y + 34, 0.7, ACCENT, 2)
@@ -189,4 +189,4 @@ def draw_help(frame: np.ndarray) -> None:
         row = y + 62 + i * 26
         _text(frame, gesture, x + 20, row, 0.48, WHITE)
         _text(frame, action, x + 230, row, 0.48, DIM)
-    _text(frame, "h close   q quit   d debug   l landmarks", x + 20, y + ph - 12, 0.42, DIM)
+    _text(frame, "h close   q quit   d debug   l landmarks", x + 20, y + ph - 18, 0.42, DIM)
