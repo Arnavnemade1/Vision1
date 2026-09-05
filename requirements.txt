@@ -1,0 +1,3 @@
+mediapipe==0.10.21  # 1.x crashes on macOS arm64 (Metal graph service unavailable)
+opencv-python>=4.8
+numpy<2

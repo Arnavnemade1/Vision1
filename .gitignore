@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+models/*.task
+saves/*.png
+saves/*.json
+.DS_Store
