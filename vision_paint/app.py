@@ -1,0 +1,163 @@
+"""Main loop: camera -> landmarks -> features -> gestures -> canvas -> screen."""
+
+from __future__ import annotations
+
+import argparse
+import time
+from collections import deque
+from typing import Deque, List, Optional
+
+import cv2
+import numpy as np
+
+from . import features as feat
+from .camera import Camera, CameraError
+from .canvas import CanvasSet
+from .commands import CommandDispatcher
+from .config import MODEL_PATH, SAVE_DIR, AppConfig
+from .hand_tracker import HandTracker
+from .state import AppState
+from .ui import draw_cursor, draw_help, draw_hud, draw_landmarks
+
+
+class VisionPaint:
+    def __init__(self, cfg: AppConfig):
+        self.cfg = cfg
+        self.camera = Camera(cfg.camera)
+        self.tracker = HandTracker(cfg.tracker, MODEL_PATH, mirrored=cfg.camera.mirror)
+        self.state: Optional[AppState] = None
+        self.dispatcher: Optional[CommandDispatcher] = None
+        self.show_help = False
+        self._fps: Deque[float] = deque(maxlen=30)
+
+    def _init_state(self, width: int, height: int) -> None:
+        canvases = CanvasSet(width, height, self.cfg.canvas)
+        self.state = AppState(cfg=self.cfg, canvases=canvases, save_dir=SAVE_DIR)
+        self.dispatcher = CommandDispatcher(self.cfg, self.state)
+        self.state.notify("Press h for the gesture list", "good")
+
+    def run(self) -> int:
+        with self.camera, self.tracker:
+            width, height = self.camera.size
+            self._init_state(width, height)
+            assert self.state and self.dispatcher
+
+            cv2.namedWindow(self.cfg.window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.cfg.window_name, width, height)
+
+            last_stamp = -1.0
+            while self.state.running:
+                frame, stamp = self.camera.read()
+                if frame is None:
+                    time.sleep(0.005)
+                    continue
+                if stamp == last_stamp:
+                    # No new frame yet; keep the UI responsive without redoing
+                    # inference on an image we have already processed.
+                    if self._handle_keys() is False:
+                        break
+                    continue
+                last_stamp = stamp
+
+                started = time.perf_counter()
+                h, w = frame.shape[:2]
+                self.state.canvases.resize(w, h)
+                aspect = w / h
+
+                hands_raw = self.tracker.process(frame, stamp)
+                hands = [feat.extract(hand, self.cfg.gesture, aspect) for hand in hands_raw]
+
+                self.dispatcher.last_camera_frame = frame
+                self.dispatcher.update(hands, stamp)
+
+                canvas = self.state.canvas
+                background = canvas.background_frame(frame)
+                composed = canvas.composite(background)
+
+                if self.cfg.show_landmarks:
+                    draw_landmarks(composed, hands)
+                draw_cursor(
+                    composed, self.dispatcher.cursor, self.state.color,
+                    self.state.brush_size, self.dispatcher.last_state.gesture.value == "draw",
+                )
+
+                self._fps.append(time.perf_counter() - started)
+                fps = 1.0 / max(np.mean(self._fps), 1e-6)
+                draw_hud(
+                    composed, self.state,
+                    self.dispatcher.last_state.gesture.value if self.dispatcher.last_state.active else "",
+                    self.dispatcher.last_state.confidence, fps,
+                    self.dispatcher.dwell_progress, self.dispatcher.dwell_label,
+                    self.dispatcher.ranking,
+                )
+                if self.show_help:
+                    draw_help(composed)
+
+                cv2.imshow(self.cfg.window_name, composed)
+                if self._handle_keys() is False:
+                    break
+
+            cv2.destroyAllWindows()
+        return 0
+
+    def _handle_keys(self) -> Optional[bool]:
+        assert self.state
+        key = cv2.waitKey(1) & 0xFF
+        if key == 255:
+            return None
+        if key in (ord("q"), 27):
+            return False
+        if key == ord("h"):
+            self.show_help = not self.show_help
+        elif key == ord("l"):
+            self.cfg.show_landmarks = not self.cfg.show_landmarks
+        elif key == ord("d"):
+            self.cfg.show_debug_panel = not self.cfg.show_debug_panel
+        elif key == ord("c"):
+            self.state.canvas.clear()
+            self.state.notify("Screen cleared", "warn")
+        elif key == ord("z"):
+            self.state.canvas.undo()
+            self.state.notify("Undo")
+        elif key == ord("s"):
+            path = self.state.canvas.save(self.state.save_dir, None)
+            self.state.notify(f"Saved {path.name}", "good")
+        elif key == ord("r"):
+            self.state.canvas.set_zoom(1.0)
+            self.state.canvas.pan[:] = 0
+            self.state.notify("View reset")
+        return None
+
+
+def build_config(args: argparse.Namespace) -> AppConfig:
+    cfg = AppConfig()
+    cfg.camera.index = args.camera
+    cfg.camera.width, cfg.camera.height = args.width, args.height
+    cfg.camera.mirror = not args.no_mirror
+    cfg.tracker.max_hands = args.hands
+    cfg.show_landmarks = not args.no_landmarks
+    cfg.show_debug_panel = args.debug
+    return cfg
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Gesture-controlled drawing")
+    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--width", type=int, default=1280)
+    ap.add_argument("--height", type=int, default=720)
+    ap.add_argument("--hands", type=int, default=2)
+    ap.add_argument("--no-mirror", action="store_true", help="do not flip the camera image")
+    ap.add_argument("--no-landmarks", action="store_true")
+    ap.add_argument("--debug", action="store_true", help="show the gesture score panel")
+    args = ap.parse_args(argv)
+
+    try:
+        return VisionPaint(build_config(args)).run()
+    except CameraError as e:
+        print(f"\n{e}\n")
+        return 2
+    except FileNotFoundError as e:
+        print(f"\n{e}\n")
+        return 3
+    except KeyboardInterrupt:
+        return 130
