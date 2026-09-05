@@ -5,3 +5,9 @@ models/*.task
 saves/*.png
 saves/*.json
 .DS_Store
+
+# Generated output and personal data
+scratch/
+preview/*.png
+saves/
+calibration.json

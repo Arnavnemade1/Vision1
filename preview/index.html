@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vision Paint — rendered output</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8;
+    --panel: #ffffff;
+    --ink: #16161a;
+    --dim: #62626c;
+    --line: #e2e2e8;
+    --accent: #b4671e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131317;
+      --panel: #1c1c21;
+      --ink: #ecece f;
+      --ink: #ececef;
+      --dim: #9a9aa4;
+      --line: #2c2c34;
+      --accent: #e0a95a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 1120px; margin: 0 auto; padding: 40px 24px 72px; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); margin: 0 0 10px; }
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    padding: 12px 16px;
+    margin: 22px 0 34px;
+    border-radius: 0 8px 8px 0;
+    color: var(--dim);
+    font-size: 14px;
+  }
+  .note strong { color: var(--ink); }
+  figure {
+    margin: 0 0 34px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  figure img { display: block; width: 100%; height: auto; }
+  figcaption {
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+    font-size: 14px;
+    color: var(--dim);
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  code {
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, var(--dim) 14%, transparent);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vision Paint — rendered output</h1>
+  <p class="sub">Frames produced by <code>tools/headless_demo.py</code>, driving synthetic
+  gestures through the real pipeline: features → classifier → stabiliser → dispatcher → canvas.</p>
+
+  <div class="note">
+    <strong>This is not the app.</strong> Vision Paint is a native OpenCV window
+    (<code>python run.py</code>) with no HTTP server of any kind. This page is a static
+    preview of its rendered output, so the frames can be inspected without a camera.
+  </div>
+
+  <figure>
+    <img src="canvas.png" alt="Canvas with solid, marker and neon strokes, plus the HUD">
+    <figcaption><b>Canvas and HUD.</b> Five strokes across three brush styles — solid,
+    translucent marker, and neon with its halo-and-core passes. Top bar shows the live
+    gesture and confidence; palette strip marks the active colour.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="debug.png" alt="Same frame with the gesture score panel visible">
+    <figcaption><b>Gesture score panel</b> (<code>d</code> in the app). The top three
+    scoring rules with their confidences — this is what makes a misfire diagnosable
+    rather than mysterious.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="help.png" alt="In-app gesture reference overlay">
+    <figcaption><b>Gesture reference</b> (<code>h</code> in the app). All twenty bindings,
+    including the movement-sensitive variants of the two-finger and pinch gestures.</figcaption>
+  </figure>
+</main>
+</body>
+</html>
