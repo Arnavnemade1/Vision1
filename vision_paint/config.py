@@ -6,13 +6,15 @@ size lives here so the recognition code stays free of magic numbers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODEL_PATH = PROJECT_ROOT / "models" / "hand_landmarker.task"
 SAVE_DIR = PROJECT_ROOT / "saves"
+CALIBRATION_PATH = PROJECT_ROOT / "calibration.json"
 
 BGR = Tuple[int, int, int]
 
@@ -144,3 +146,26 @@ class AppConfig:
     show_landmarks: bool = True
     show_debug_panel: bool = False
     window_name: str = "Vision Paint"
+    calibration: Optional[str] = None   # path of the calibration actually applied
+
+    def apply_calibration(self, data: Dict[str, Any]) -> list:
+        """Overlay measured thresholds onto the gesture config.
+
+        Only keys that exist on GestureConfig are taken, so an old or hand-edited
+        calibration file can never inject unknown settings.
+        """
+        known = {f.name for f in fields(GestureConfig)}
+        applied = []
+        for key, value in (data.get("gesture") or {}).items():
+            if key in known and isinstance(value, (int, float)):
+                setattr(self.gesture, key, float(value))
+                applied.append(key)
+        return applied
+
+    def load_calibration(self, path: Path = CALIBRATION_PATH) -> list:
+        if not path.exists():
+            return []
+        applied = self.apply_calibration(json.loads(path.read_text()))
+        if applied:
+            self.calibration = str(path)
+        return applied

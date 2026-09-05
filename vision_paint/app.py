@@ -137,6 +137,11 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     cfg.tracker.max_hands = args.hands
     cfg.show_landmarks = not args.no_landmarks
     cfg.show_debug_panel = args.debug
+    if not args.no_calibration:
+        applied = cfg.load_calibration()
+        if applied:
+            print(f"calibration: applied {len(applied)} measured thresholds "
+                  f"from {cfg.calibration}")
     return cfg
 
 
@@ -149,6 +154,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-mirror", action="store_true", help="do not flip the camera image")
     ap.add_argument("--no-landmarks", action="store_true")
     ap.add_argument("--debug", action="store_true", help="show the gesture score panel")
+    ap.add_argument("--no-calibration", action="store_true",
+                    help="ignore calibration.json and use the built-in thresholds")
     args = ap.parse_args(argv)
 
     try:

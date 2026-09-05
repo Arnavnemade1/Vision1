@@ -160,6 +160,21 @@ def _draw_stroke(layer: np.ndarray, stroke: Stroke) -> None:
         line(a, b, width, color)
 
 
+def _alpha_over(layer: np.ndarray, background: np.ndarray) -> np.ndarray:
+    """Composite a BGRA layer over a BGR frame.
+
+    Straight vectorised blend over the whole frame. Masking out the opaque
+    pixels and blending only the anti-aliased edges sounds cheaper and measures
+    four times slower -- boolean fancy-indexing over a 720p array costs far more
+    than the arithmetic it avoids.
+    """
+    alpha = layer[:, :, 3:4].astype(np.float32) / 255.0
+    return (
+        background.astype(np.float32) * (1.0 - alpha)
+        + layer[:, :, :3].astype(np.float32) * alpha
+    ).astype(np.uint8)
+
+
 class Canvas:
     """A single drawing: an ordered list of strokes plus its view transform."""
 
@@ -274,8 +289,7 @@ class Canvas:
                 layer, m, (self.width, self.height),
                 flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0, 0),
             )
-        alpha = (layer[:, :, 3:4].astype(np.float32)) / 255.0
-        return (background.astype(np.float32) * (1 - alpha) + layer[:, :, :3].astype(np.float32) * alpha).astype(np.uint8)
+        return _alpha_over(layer, background)
 
     def background_frame(self, camera_frame: np.ndarray) -> np.ndarray:
         name, color = self.cfg.backgrounds[self.background_index % len(self.cfg.backgrounds)]
