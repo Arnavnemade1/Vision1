@@ -1,9 +1,12 @@
 # Vision Paint
 
-Draw on your webcam feed with your hands. A camera watches your hand, a
-geometric classifier reads the pose, and a temporal filter turns that into
-drawing commands — no training data, no model to fine-tune, every threshold
-inspectable and adjustable.
+A gesture-driven whiteboard. A camera watches your hand, a geometric classifier
+reads the pose, and a temporal filter turns that into drawing commands — no
+training data, no model to fine-tune, every threshold inspectable and
+adjustable.
+
+The board is larger than the window, and drawings are objects rather than
+pixels: pinch one, move it aside, and draw another beside it.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -24,8 +27,10 @@ initialize` and the app exits with a message saying so.
 | ☝️ Index finger | Draw |
 | ✌️ Two fingers, held still | Change colour |
 | ✊ Closed fist | Erase |
+| 🤏 Pinch **on a drawing**, then move | Pick that drawing up and move it |
+| 🤏 Pinch **empty space**, then move | Pan the board |
 | 🤏 Pinch, held still | Select tool (brush / line / rectangle / circle) |
-| 🖐️ Open palm, fingers spread | Clear screen *(hold 1.4 s)* |
+| 🖐️ Open palm, fingers spread | Clear the board *(hold 1.4 s)* |
 | 👍 Thumbs up | Save drawing |
 | 👎 Thumbs down | Delete last save *(hold 1.4 s)* |
 | 🤞 Crossed fingers | Undo |
@@ -38,7 +43,7 @@ initialize` and the app exits with a message saying so.
 | 🖖 Four fingers | Change background |
 | 👌 OK sign | Confirm selection |
 | 🤙 Thumb + little finger | Open / close menu |
-| ✌️ + swipe left/right | Change canvas |
+| ✌️ + swipe left/right | Change board |
 | 🤏 + open/close the pinch | Zoom in / out |
 | 🙏 Both palms together | Exit *(hold 1.4 s)* |
 
@@ -57,20 +62,42 @@ shape alone. Each is separated by a second signal rather than by luck:
 2. **🖐️ clear screen vs ✋ pause.** Both are five fingers up. Finger spread
    decides: fanned out clears, held together pauses. Clearing also needs a
    1.4-second hold, so a misread cannot wipe a drawing instantly.
-3. **✌️ colour vs ✌️ + move, 🤏 tool vs 🤏 + move.** Movement decides, and it
-   gets first refusal: if the hand swipes or the pinch opens, the moving
-   command fires and the still command is suppressed for the rest of that
-   gesture press. One hand movement never triggers two commands.
+3. **✌️ colour vs ✌️ + move, 🤏 tool vs 🤏 + grab / pan / zoom.** Movement
+   decides, and it gets first refusal. A pinch commits to one of four readings
+   within a fraction of a second and holds it until the hand opens, so once you
+   have hold of a drawing, wobbling your fingers cannot turn the drag into a
+   zoom. Pausing mid-pinch does *not* disqualify a grab — pinching, thinking,
+   then dragging is how people actually pick things up.
+
+## Moving drawings around
+
+The board is twice the width and height of the window. Strokes that sit near
+each other are treated as one drawing; strokes elsewhere on the board are a
+different one. Pinch over a drawing and the group you would pick up is outlined
+on screen before you commit to it; drag, and it comes with you. Pinch where
+there is nothing and you pan the board instead.
+
+A minimap in the corner shows where the window sits on the board and where the
+drawings are, so nothing can be panned out of sight and lost. Moves go onto the
+same undo stack as strokes, so 🤞 walks back through moves and marks alike.
+
+Grouping is proximity-based, which is a blunt rule that happens to match how
+people draw: the strokes of one doodle overlap or nearly touch, and a doodle
+drawn elsewhere does not. `group_gap_ratio` in `config.py` sets how close is
+close enough, as a fraction of window width rather than a pixel count, so it
+behaves the same at any resolution.
 
 ## How recognition works
 
 ```
-camera ─▶ hand landmarks ─▶ geometric features ─▶ scored rules ─▶ voting window ─▶ event gate ─▶ canvas
-         (MediaPipe +        (curl, spread,        (18 gestures,    (5 of 7 frames)  (cooldown +
-          One Euro filter)     reach, direction)     0..1 each)                        dwell)
+camera ─▶ hand landmarks ─▶ geometric features ─▶ scored rules ─▶ voting window ─▶ event gate ─▶ board
+         (MediaPipe +        (curl, spread,        (18 gestures,    (weighted,       (cooldown +
+          One Euro filter)     reach, direction,     0..1 each)       5 of 7 frames)   dwell)
+                               exponentially
+                               smoothed)
 ```
 
-Four decisions carry most of the accuracy:
+Six decisions carry most of the accuracy:
 
 **Curl is measured across long baselines.** Finger flexion comes from the angle
 between the proximal phalanx and the PIP-to-tip chord, not from summing
@@ -93,10 +120,26 @@ exactly how a pointing hand gets read as a drawing hand. Blending in the
 minimum keeps near-misses ranked below clean matches while still degrading
 smoothly rather than snapping to zero.
 
+**The measurements are smoothed, not just the conclusions.** The voting window
+rejects bad frames by throwing whole classifications away. Exponentially
+smoothing the underlying measurements first (75 ms time constant, per hand,
+reset when a hand leaves) means a noisy frame nudges the answer instead of
+contradicting it. Under 5 mm of landmark noise this takes end-to-end accuracy
+from 94.8% to 97.5% and cuts wrong commands from 2.9% to 1.9% — and because it
+works upstream, the voting window can stay short, which is what keeps the
+system feeling responsive. `--no-smoothing` on the sweep reproduces the A/B.
+
+**A hand half out of frame is not trusted.** Landmarks MediaPipe has had to
+extrapolate past the frame edge are guesses, so confidence is scaled by the
+fraction of the hand comfortably inside the image before any threshold sees it.
+
 **Nothing fires on a single frame.** A gesture must win 5 of the last 7 frames
-before it counts, one-shot commands go on cooldown so holding a pose does not
-repeat it, and destructive commands need a visible 1.4-second hold. Deleting a
-saved drawing moves the file to `saves/.trash/` rather than unlinking it.
+before it counts, with votes weighted by confidence rather than counted — four
+frames of a clean read should outrank five frames of a marginal one, and plain
+counting gets that backwards. One-shot commands go on cooldown so holding a
+pose does not repeat it, and destructive commands need a visible 1.4-second
+hold. Deleting a saved drawing moves the file to `saves/.trash/` rather than
+unlinking it.
 
 ### Measured accuracy
 
@@ -108,7 +151,9 @@ scores the classifier over them.
 | --- | --- | --- | --- |
 | Per frame, moderate pose jitter | 98.4% | 0.4% | 1.1% |
 | Per frame, heavy pose jitter | 92.0% | 4.2% | 3.8% |
-| Held gesture through the stabiliser, heavy jitter | 99.1% | 0.7% | **0.1%** |
+| Held gesture through the stabiliser, heavy jitter | 99.3% | 0.6% | **0.2%** |
+| Held gesture, 5 mm landmark noise, no feature smoothing | 94.8% | 2.3% | 2.9% |
+| Held gesture, 5 mm landmark noise, feature smoothing on | 97.5% | 0.6% | 1.9% |
 
 Rejections and misfires are counted separately on purpose: a rejection costs
 you a repeated gesture, a misfire costs you an unwanted edit. The stabiliser
@@ -117,6 +162,7 @@ exists to turn the second kind into the first.
 ```bash
 python tools/sweep.py --samples 400 --strength 0.5      # per-frame
 python tools/sweep.py --stream --samples 120            # end to end
+python tools/sweep.py --stream --no-smoothing           # A/B the smoother
 ```
 
 These numbers come from a synthetic hand model, not from footage of real hands.
@@ -144,11 +190,27 @@ it.
 ## Performance
 
 At 1280×720 on an M-series Mac: ~13 ms for MediaPipe inference (worst case,
-with the palm detector running every frame), ~8 ms for everything else —
-features, dispatch, canvas render, composite and HUD, with 60 strokes on the
-canvas. That is a ~47 fps ceiling against a 30 fps camera, so the pipeline is
-not the bottleneck. Camera capture runs on its own thread so the main loop
-never blocks on I/O.
+with the palm detector running every frame), and for everything else —
+features, dispatch, board render, composite and HUD — **0.5 ms** with a drawing
+in one part of the board, rising to **4.3 ms** in the pathological case of ink
+covering all four times the window area. Camera capture runs on its own thread
+so the main loop never blocks on I/O.
+
+The board being four times the window area could easily have cost four times
+the frame budget. Three things stop it:
+
+- **The viewport is a slice, not a resample.** At the default view the window
+  is a whole-pixel window into the board raster, so cropping to it is a memory
+  slice. Zoom and fractional pan fall back to a warp, which is output-driven
+  and therefore still viewport-sized.
+- **Live strokes never touch the board raster.** The stroke under your finger
+  and any drawing being dragged are rasterised straight into view space, so
+  drawing and dragging cost one small overlay redraw instead of copying a
+  14 MB board every frame. A drag also lifts its strokes out of the cache, so
+  moving a drawing never invalidates it.
+- **Only the rectangle containing ink is blended,** through cv2 integer
+  arithmetic rather than float32 numpy — bit-identical output at a little over
+  half the time, and the blend was the single largest cost in the frame.
 
 ## Layout
 
@@ -163,8 +225,8 @@ vision_paint/
   gestures.py             scored classification rules
   stabilizer.py           voting window + event gate
   motion.py               swipe and pinch-rate detection
-  canvas.py               vector strokes, styles, undo, zoom, save
-  state.py                brush, menu and canvas state
+  canvas.py               board: vector strokes, groups, moves, undo, save
+  state.py                brush, menu and board state
   commands.py             gesture -> action bindings
   ui.py                   HUD, menu, help overlay
   app.py                  main loop
@@ -175,6 +237,20 @@ tools/
   headless_demo.py        render a frame with no camera
 tests/                    157 tests, no camera required
 ```
+
+## Smoothness
+
+Three separate smoothers, because they want different settings:
+
+- **Landmarks** get a One Euro filter tuned for responsiveness — the pose
+  recogniser needs to see a gesture form quickly.
+- **The pen** gets its own, much gentler One Euro filter. Ink records every
+  tremor the recogniser is happy to average away, so the drawing point is
+  filtered harder than the hand that produced it.
+- **Committed strokes** are rendered through two passes of Chaikin
+  corner-cutting. Freehand input arrives as a polyline of hand samples and
+  looks like one; corner-cutting both removes the jitter and quadruples the
+  sample density, so a stroke draws as a curve rather than a chain of segments.
 
 ## Design notes
 

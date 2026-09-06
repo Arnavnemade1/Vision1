@@ -216,6 +216,9 @@ class GestureClassifier:
     def classify(self, f: HandFeatures, min_confidence: float = 0.5) -> Classification:
         ranking = self.score_all(f)
         best, score = ranking[0]
+        # A pose read off landmarks that run past the frame edge is a guess, so
+        # its confidence is discounted rather than taken at face value.
+        score *= f.quality
         if score < min_confidence:
             return Classification(Gesture.NONE, score, ranking)
         return Classification(best, score, ranking)

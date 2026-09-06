@@ -51,14 +51,17 @@ class GestureStabilizer:
         for g, c in self._window:
             tally.setdefault(g, []).append(c)
 
-        winner, votes, mean_conf = Gesture.NONE, 0, 0.0
+        # Votes are weighted by confidence rather than counted. Four frames of
+        # a clean read should outrank five frames of a marginal one; plain
+        # counting gets that backwards, which is how a gesture passed through on
+        # the way to another one wins the window.
+        winner, votes, mean_conf, weight = Gesture.NONE, 0, 0.0, 0.0
         for g, confs in tally.items():
             if g is Gesture.NONE:
                 continue
-            n = len(confs)
-            avg = sum(confs) / n
-            if n > votes or (n == votes and avg > mean_conf):
-                winner, votes, mean_conf = g, n, avg
+            w = sum(confs)
+            if w > weight:
+                winner, votes, mean_conf, weight = g, len(confs), w / len(confs), w
 
         accepted = (
             winner is not Gesture.NONE
@@ -89,6 +92,18 @@ class EventGate:
         self._last_fired.clear()
         self._armed.clear()
 
+    def arm(self, state: StableState) -> None:
+        """Mark a freshly formed gesture as eligible to fire.
+
+        Arming has to happen the moment a gesture becomes stable, whether or not
+        anything tries to fire it on that frame. When it was folded into
+        try_fire, any gesture whose first stable frame was consumed elsewhere --
+        a pinch still deciding whether it is a grab, say -- was never armed, and
+        so could never fire at all.
+        """
+        if state.active and state.changed:
+            self._armed[state.gesture] = True
+
     def progress(self, state: StableState, dwell: float) -> float:
         """0..1 progress toward committing a dwell-gated gesture."""
         if not state.active or dwell <= 0:
@@ -112,8 +127,7 @@ class EventGate:
         if not state.active:
             return False
         g = state.gesture
-        if state.changed:
-            self._armed[g] = True
+        self.arm(state)
         if state.held < dwell:
             return False
         if not repeat and not self._armed.get(g, False):

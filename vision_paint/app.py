@@ -17,7 +17,8 @@ from .commands import CommandDispatcher
 from .config import MODEL_PATH, SAVE_DIR, AppConfig
 from .hand_tracker import HandTracker
 from .state import AppState
-from .ui import draw_cursor, draw_help, draw_hud, draw_landmarks
+from .ui import (draw_cursor, draw_group_highlight, draw_help, draw_hud,
+                 draw_landmarks, draw_minimap, theme_for)
 
 
 class VisionPaint:
@@ -74,7 +75,10 @@ class VisionPaint:
             aspect = w / h
 
             hands_raw = self.tracker.process(frame, stamp)
-            hands = [feat.extract(hand, self.cfg.gesture, aspect) for hand in hands_raw]
+            hands = [
+                feat.extract(hand, self.cfg.gesture, aspect, self.cfg.tracker.edge_margin)
+                for hand in hands_raw
+            ]
 
             self.dispatcher.last_camera_frame = frame
             self.dispatcher.update(hands, stamp)
@@ -83,8 +87,15 @@ class VisionPaint:
             background = canvas.background_frame(frame)
             composed = canvas.composite(background)
 
+            draw_group_highlight(
+                composed, canvas,
+                self.dispatcher.grabbed_group or self.dispatcher.hover_group,
+                self.dispatcher.grabbed_group is not None,
+            )
+            if canvas.zoom != 1.0 or canvas.pan.any() or len(canvas.groups()) > 1:
+                draw_minimap(composed, canvas)
             if self.cfg.show_landmarks:
-                draw_landmarks(composed, hands)
+                draw_landmarks(composed, hands, theme_for(canvas))
             draw_cursor(
                 composed, self.dispatcher.cursor, self.state.color,
                 self.state.brush_size, self.dispatcher.last_state.gesture.value == "draw",
@@ -97,10 +108,10 @@ class VisionPaint:
                 self.dispatcher.last_state.gesture.value if self.dispatcher.last_state.active else "",
                 self.dispatcher.last_state.confidence, fps,
                 self.dispatcher.dwell_progress, self.dispatcher.dwell_label,
-                self.dispatcher.ranking,
+                self.dispatcher.ranking, self.dispatcher.pinch_mode,
             )
             if self.show_help:
-                draw_help(composed)
+                draw_help(composed, theme_for(canvas))
 
             cv2.imshow(self.cfg.window_name, composed)
             if self._handle_keys() is False:
@@ -126,14 +137,13 @@ class VisionPaint:
             self.state.canvas.clear()
             self.state.notify("Screen cleared", "warn")
         elif key == ord("z"):
-            self.state.canvas.undo()
-            self.state.notify("Undo")
+            what = self.state.canvas.undo()
+            self.state.notify(f"Undo: {what}" if what else "Nothing to undo")
         elif key == ord("s"):
             path = self.state.canvas.save(self.state.save_dir, None)
             self.state.notify(f"Saved {path.name}", "good")
         elif key == ord("r"):
-            self.state.canvas.set_zoom(1.0)
-            self.state.canvas.pan[:] = 0
+            self.state.canvas.reset_view()
             self.state.notify("View reset")
         return None
 
@@ -155,7 +165,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Gesture-controlled drawing")
+    ap = argparse.ArgumentParser(description="Gesture-controlled whiteboard")
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)

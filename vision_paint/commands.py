@@ -2,13 +2,17 @@
 
 The binding table below is the contract between the recognition half of the
 system and the drawing half. Two gestures are context-sensitive and resolved
-against hand movement rather than shape alone:
+against what the hand is doing rather than its shape alone:
 
-  two fingers  held still -> next colour        swiped sideways -> change canvas
-  pinch        held still -> next tool          opened/closed   -> zoom
+  two fingers  held still -> next colour   swiped sideways -> change canvas
+  pinch        held still -> next tool     moved -> grab a drawing, or pan the
+                                           board if the pinch caught nothing
+                                           opened/closed -> zoom
 
-In both cases the moving reading wins, and the still reading is suppressed for
-the rest of that gesture press, so one hand movement never fires two commands.
+A pinch commits to one of those four readings within the first fraction of a
+second and keeps it until the hand opens again. Locking the mode up front is
+what makes dragging a drawing feel like holding an object: once you have hold
+of something, wobbling your fingers cannot turn the drag into a zoom.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .config import AppConfig
-from .features import HandFeatures
+from .features import FeatureSmoother, HandFeatures
+from .filters import OneEuroFilter
 from .gestures import Gesture, GestureClassifier, classify_two_hands
 from .motion import MotionTracker
 from .stabilizer import EventGate, GestureStabilizer, StableState
@@ -41,7 +46,7 @@ def build_bindings(cfg: AppConfig) -> Dict[Gesture, Binding]:
     dwell = cfg.stabilizer.destructive_dwell
     table = (
         Binding(Gesture.TWO_FINGERS, "Change colour", dwell=0.30, needs_still=True),
-        Binding(Gesture.PINCH, "Select tool", dwell=0.35, needs_still=True),
+        Binding(Gesture.PINCH, "Grab / tool", dwell=0.35, needs_still=True),
         Binding(Gesture.OPEN_PALM, "Clear screen", dwell=dwell, destructive=True),
         Binding(Gesture.THUMBS_UP, "Save drawing", cooldown=1.2),
         Binding(Gesture.THUMBS_DOWN, "Delete drawing", dwell=dwell, destructive=True),
@@ -72,6 +77,10 @@ class CommandDispatcher:
         self.stabilizer = GestureStabilizer(cfg.stabilizer)
         self.gate = EventGate(cfg.stabilizer)
         self.motion = MotionTracker(cfg.motion)
+        self.smoother = FeatureSmoother(cfg.tracker.feature_smoothing)
+        # The pen gets its own, heavier smoothing: ink records every tremor the
+        # pose recogniser is happy to average away.
+        self.pen = OneEuroFilter(cfg.tracker.draw_min_cutoff, cfg.tracker.draw_beta)
 
         self.two_hand_stabilizer = GestureStabilizer(cfg.stabilizer)
         self.two_hand_gate = EventGate(cfg.stabilizer)
@@ -86,6 +95,15 @@ class CommandDispatcher:
         self._dynamic_used = False   # a movement already claimed this press
         self._stroke_kind: Optional[str] = None   # "draw" | "erase" | None
         self._last_swipe = -1e9
+        self._last_now = 0.0
+
+        # Pinch manipulation state, all reset on each new pinch press.
+        self.pinch_mode: Optional[str] = None      # grab | pan | zoom | tool
+        self.hover_group = None                    # what a pinch would pick up
+        self.grabbed_group = None                  # what a pinch is holding
+        self._grab_anchor: Optional[np.ndarray] = None
+        self._grab_last_board: Optional[np.ndarray] = None
+        self._grab_total = np.zeros(2)
 
     # ---- helpers ----------------------------------------------------------
 
@@ -120,9 +138,12 @@ class CommandDispatcher:
 
         if not hands:
             self._end_stroke()
+            self._release_grab()
             self.stabilizer.update(Gesture.NONE, 0.0, now)
             self.motion.reset()
+            self.pen.reset()
             self.cursor = None
+            self.hover_group = None
             self.dwell_progress = 0.0
             self.last_state = self.stabilizer.state
             return
@@ -133,6 +154,7 @@ class CommandDispatcher:
         hand = self._pick_primary(hands)
         assert hand is not None
 
+        hand = self.smoother(hand, now, self.cfg.gesture)
         result = self.classifier.classify(hand, self.cfg.stabilizer.min_confidence)
         self.ranking = result.ranking[:3]
         self.last_confidence = result.confidence
@@ -141,8 +163,15 @@ class CommandDispatcher:
         self.last_state = state
         motion = self.motion.update(hand.palm_center, hand.pinch, now)
 
+        dt = max(now - self._last_now, 1e-3) if self._last_now else 1 / 30
+        self._last_now = now
+        # Arm before any handler can consume the frame, or a gesture whose first
+        # stable frame goes to the pinch machine never becomes eligible to fire.
+        self.gate.arm(state)
+
         if state.changed:
             self._dynamic_used = False
+            self._release_grab()
 
         self.cursor = hand.index_tip if state.gesture is not Gesture.FIST else hand.palm_center
 
@@ -167,8 +196,9 @@ class CommandDispatcher:
         # Movement-sensitive gestures get first refusal on the frame.
         if state.gesture is Gesture.TWO_FINGERS and self._handle_canvas_swipe(now):
             return
-        if state.gesture is Gesture.PINCH and self._handle_zoom(motion):
-            return
+        if state.gesture is Gesture.PINCH:
+            if self._handle_pinch(hand, state, motion, dt):
+                return
 
         if binding.needs_still and (self._dynamic_used or not self.motion.is_still):
             return
@@ -185,9 +215,12 @@ class CommandDispatcher:
             return
         if self._stroke_kind != "draw":
             self._end_stroke()
+            self.pen.reset()
             st.canvas.begin_stroke(st.tool, st.color, st.brush_size, st.style)
             self._stroke_kind = "draw"
-        st.canvas.extend_stroke(self._canvas_point(hand.index_tip))
+        tip = self.pen(hand.index_tip, self._last_now)
+        self.cursor = tip
+        st.canvas.extend_stroke(self._canvas_point(tip))
 
     def _handle_erase(self, hand: HandFeatures) -> None:
         st = self.state
@@ -219,15 +252,90 @@ class CommandDispatcher:
         self.state.notify(f"Canvas {canvas.name} of {len(self.state.canvases.canvases)}", "good")
         return True
 
-    def _handle_zoom(self, motion) -> bool:
+    def _handle_pinch(self, hand: HandFeatures, state, motion, dt: float) -> bool:
+        """Grab, pan, zoom or select -- decided once per pinch, then held.
+
+        Returns True when the pinch has been consumed as a manipulation, which
+        leaves the generic binding path (tool cycling) for the case where the
+        hand pinched and then did nothing.
+        """
         cfg = self.cfg.motion
-        if abs(motion.pinch_rate) < cfg.zoom_min_delta:
-            return False
         canvas = self.state.canvas
-        canvas.set_zoom(canvas.zoom * (1.0 + motion.pinch_rate * cfg.zoom_gain * (1 / 30)))
-        self._dynamic_used = True
-        self.state.notify(f"Zoom {canvas.zoom:.2f}x")
-        return True
+        point = hand.pinch_point
+        board = np.array(canvas.screen_to_board(point[0] * canvas.width,
+                                                point[1] * canvas.height))
+
+        if self._grab_anchor is None:
+            self._grab_anchor = np.array(point, dtype=float)
+            self._grab_last_board = board
+
+        travel = float(np.linalg.norm(np.array(point) - self._grab_anchor))
+
+        if self.pinch_mode is None:
+            # Keep tracking what the fingers are over, so the highlight follows
+            # the hand and a grab picks up whatever is under it at the moment
+            # the drag starts -- not whatever happened to be there when the
+            # fingers first closed.
+            self.hover_group = canvas.group_at(board[0], board[1])
+
+            if abs(motion.pinch_rate) >= cfg.zoom_min_delta:
+                self.pinch_mode = "zoom"
+            elif travel >= cfg.grab_min_distance:
+                if self.hover_group is not None:
+                    self.pinch_mode = "grab"
+                    self.grabbed_group = self.hover_group
+                    self._grab_last_board = board
+                    self._grab_total = np.zeros(2)
+                    canvas.lift(self.grabbed_group)
+                    self.state.notify(
+                        f"Holding {len(self.grabbed_group.strokes)} strokes", "good"
+                    )
+                else:
+                    self.pinch_mode = "pan"
+            elif state.held < cfg.grab_intent_seconds:
+                # Still deciding: hold the frame so a slow reach toward a
+                # drawing is not mistaken for a deliberate still pose.
+                return True
+
+        if self.pinch_mode == "zoom":
+            self._dynamic_used = True
+            canvas.set_zoom(canvas.zoom * (1.0 + motion.pinch_rate * cfg.zoom_gain * dt))
+            self.state.notify(f"Zoom {canvas.zoom:.2f}x")
+            return True
+
+        if self.pinch_mode == "grab" and self.grabbed_group is not None:
+            self._dynamic_used = True
+            delta = board - self._grab_last_board
+            self._grab_last_board = board
+            self._grab_total = self._grab_total + delta
+            canvas.drag_to(self.grabbed_group, delta)
+            return True
+
+        if self.pinch_mode == "pan":
+            self._dynamic_used = True
+            screen_delta = (np.array(point) - self._grab_anchor)
+            self._grab_anchor = np.array(point, dtype=float)
+            canvas.pan_by(screen_delta[0] * canvas.width, screen_delta[1] * canvas.height)
+            return True
+
+        return False
+
+    def _release_grab(self) -> None:
+        """Let go at the end of a pinch and record the move for undo."""
+        canvas = self.state.canvas
+        if self.pinch_mode == "grab" and self.grabbed_group is not None:
+            canvas.drop(self.grabbed_group, self._grab_total)
+            moved = float(np.linalg.norm(self._grab_total))
+            if moved > 1.0:
+                self.state.notify(f"Moved {len(self.grabbed_group.strokes)} strokes")
+        else:
+            canvas.floating = []
+        self.pinch_mode = None
+        self.grabbed_group = None
+        self.hover_group = None
+        self._grab_anchor = None
+        self._grab_last_board = None
+        self._grab_total = np.zeros(2)
 
     # ---- two hands --------------------------------------------------------
 
@@ -294,8 +402,15 @@ class CommandDispatcher:
             st.size_index = max(st.size_index - 1, 0)
             st.notify(f"Brush {st.brush_size}px")
         elif gesture is Gesture.PINCH:
+            # Reached when a pinch has stayed put long enough to read as a pose
+            # rather than a manipulation. Deliberately does NOT lock the pinch
+            # into a mode: pinching, pausing, then dragging is a natural way to
+            # pick something up, and locking here made that impossible. The
+            # event gate already stops the tool firing twice in one press, and
+            # re-anchoring means the pause itself is not counted as travel.
             st.tool_index = (st.tool_index + 1) % len(cfg.tools)
             st.notify(f"Tool: {st.tool}")
+            self._grab_anchor = None
         elif gesture is Gesture.THREE_FINGERS:
             st.style_index = (st.style_index + 1) % len(cfg.brush_styles)
             st.notify(f"Style: {st.style}")
@@ -304,13 +419,17 @@ class CommandDispatcher:
             canvas.background_index = (canvas.background_index + 1) % len(cfg.backgrounds)
             st.notify(f"Background: {cfg.backgrounds[canvas.background_index][0]}")
         elif gesture is Gesture.CROSSED_FINGERS:
-            st.notify("Undo" if st.canvas.undo() else "Nothing to undo", "warn" if st.canvas.is_empty else "info")
+            self._release_grab()
+            what = st.canvas.undo()
+            st.notify(f"Undo: {what}" if what else "Nothing to undo",
+                      "info" if what else "warn")
         elif gesture is Gesture.PALM_FLAT:
             st.paused = not st.paused
             self._end_stroke()
             st.notify("Paused" if st.paused else "Resumed", "warn" if st.paused else "good")
         elif gesture is Gesture.OPEN_PALM:
-            st.notify("Screen cleared" if st.canvas.clear() else "Already empty", "warn")
+            self._release_grab()
+            st.notify("Board cleared" if st.canvas.clear() else "Already empty", "warn")
         elif gesture is Gesture.THUMBS_UP:
             path = st.canvas.save(st.save_dir, self.last_camera_frame)
             st.notify(f"Saved {path.name}", "good")

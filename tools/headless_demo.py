@@ -25,7 +25,8 @@ from vision_paint.config import AppConfig
 from vision_paint.features import extract
 from vision_paint.state import AppState
 from vision_paint.synthetic import POSES, build_frame
-from vision_paint.ui import draw_cursor, draw_help, draw_hud, draw_landmarks
+from vision_paint.ui import (draw_cursor, draw_group_highlight, draw_help, draw_hud,
+                             draw_landmarks, draw_minimap, theme_for)
 
 DT = 1 / 30
 W, H = 1280, 720
@@ -62,6 +63,24 @@ class Runner:
             self.dispatcher.update(self.hands, self.t)
         return self
 
+    def aim(self, pose: str, attribute: str, target):
+        hand = extract(build_frame(POSES[pose], center=(0.5, 0.5)), self.cfg.gesture, W / H)
+        off = np.asarray(getattr(hand, attribute)) - np.array([0.5, 0.5])
+        return (target[0] - off[0], target[1] - off[1])
+
+    def screen_of(self, group):
+        canvas = self.state.canvas
+        x0, y0, x1, y1 = group.bounds
+        sx, sy = canvas.board_to_screen((x0 + x1) / 2, (y0 + y1) / 2)
+        return (sx / canvas.width, sy / canvas.height)
+
+    def grab_drag(self, frm, to, settle: float = 0.4, drag: float = 0.9):
+        start = self.aim("pinch", "pinch_point", frm)
+        end = self.aim("pinch", "pinch_point", to)
+        self.hold("pinch", settle, center=start)
+        self.hold("pinch", drag, path=line(start[0], start[1], end[0], end[1]))
+        return self
+
     def gap(self, seconds: float = 0.35):
         for _ in range(int(seconds / DT)):
             self.t += DT
@@ -72,8 +91,15 @@ class Runner:
     def render(self, show_help: bool = False) -> np.ndarray:
         canvas = self.state.canvas
         composed = canvas.composite(canvas.background_frame(self.frame))
+        draw_group_highlight(
+            composed, canvas,
+            self.dispatcher.grabbed_group or self.dispatcher.hover_group,
+            self.dispatcher.grabbed_group is not None,
+        )
+        if canvas.zoom != 1.0 or canvas.pan.any() or len(canvas.groups()) > 1:
+            draw_minimap(composed, canvas)
         if self.hands:
-            draw_landmarks(composed, self.hands)
+            draw_landmarks(composed, self.hands, theme_for(canvas))
         draw_cursor(
             composed, self.dispatcher.cursor, self.state.color, self.state.brush_size,
             self.dispatcher.last_state.gesture.value == "draw",
@@ -83,10 +109,10 @@ class Runner:
             self.dispatcher.last_state.gesture.value if self.dispatcher.last_state.active else "",
             self.dispatcher.last_state.confidence, 29.4,
             self.dispatcher.dwell_progress, self.dispatcher.dwell_label,
-            self.dispatcher.ranking,
+            self.dispatcher.ranking, self.dispatcher.pinch_mode,
         )
         if show_help:
-            draw_help(composed)
+            draw_help(composed, theme_for(canvas))
         return composed
 
 
@@ -112,22 +138,27 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     run = Runner(cfg, out.parent)
 
-    # A few strokes in different colours, sizes and styles.
-    run.hold("draw", 1.0, path=line(0.14, 0.62, 0.40, 0.30)).gap()
-    run.hold("point_right", 0.5).gap()          # next colour
-    run.hold("point_up", 0.9).gap()             # bigger brush
-    run.hold("draw", 1.2, path=arc(0.42, 0.50, 0.11, 190, 500)).gap()
-    run.hold("three_fingers", 0.6).gap()        # marker style
-    run.hold("point_right", 0.5).gap()
-    run.hold("draw", 1.0, path=line(0.60, 0.28, 0.86, 0.62)).gap()
-    run.hold("three_fingers", 0.6).gap()        # neon style
-    run.hold("point_right", 0.5).gap()
-    run.hold("point_up", 0.6).gap()
-    run.hold("draw", 1.2, path=arc(0.72, 0.46, 0.10, 90, 430)).gap()
-    run.hold("draw", 0.8, path=line(0.20, 0.78, 0.85, 0.78)).gap()
+    # Draw a first sketch near the middle of the board.
+    run.hold("draw", 0.9, path=arc(0.46, 0.46, 0.10, 200, 520)).gap()
+    run.hold("draw", 0.5, path=line(0.40, 0.62, 0.54, 0.62)).gap()
 
-    # Leave the frame mid-gesture so the HUD has something live to show.
-    run.hold("two_fingers", 0.5)
+    # Pick it up and shove it aside to free the space -- the whole point of the
+    # board being larger than the window.
+    where = run.screen_of(run.state.canvas.groups()[0])
+    run.grab_drag(where, (where[0] - 0.30, where[1] - 0.04)).gap()
+
+    # Then draw something new where it used to be, in another colour and style.
+    run.hold("point_right", 0.5).gap()
+    run.hold("point_up", 0.7).gap()
+    run.hold("three_fingers", 0.6).gap()          # marker
+    run.hold("draw", 1.0, path=arc(0.56, 0.46, 0.11, 90, 430)).gap()
+    run.hold("point_right", 0.5).gap()
+    run.hold("three_fingers", 0.6).gap()          # neon
+    run.hold("draw", 0.8, path=line(0.72, 0.34, 0.88, 0.60)).gap()
+
+    # Leave the hand hovering a drawing so the grab highlight is on screen.
+    target = run.screen_of(run.state.canvas.groups()[0])
+    run.hold("pinch", 0.5, center=run.aim("pinch", "pinch_point", target))
 
     frame = run.render(show_help=a.help_overlay)
     cv2.imwrite(str(out), frame)

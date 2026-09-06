@@ -67,6 +67,7 @@ class HandFeatures:
     hand_axis: np.ndarray              # image-space wrist -> middle MCP, y-up
     index_dir: np.ndarray              # image-space index MCP -> tip, y-up
     thumb_dir: np.ndarray              # image-space thumb MCP -> tip, y-up
+    quality: float                     # 1 = fully in frame, 0 = mostly outside
     index_tip: np.ndarray              # image-space (x, y) in [0, 1]
     palm_center: np.ndarray
     pinch_point: np.ndarray            # midpoint of thumb and index tips
@@ -85,7 +86,24 @@ def _image_xy(landmarks: np.ndarray, idx: int, aspect: float) -> np.ndarray:
     return np.array([landmarks[idx, 0] * aspect, 1.0 - landmarks[idx, 1]])
 
 
-def extract(hand: HandFrame, cfg: GestureConfig, aspect: float = 16 / 9) -> HandFeatures:
+def frame_quality(landmarks: np.ndarray, margin: float = 0.02) -> float:
+    """How much of the hand is comfortably inside the image.
+
+    Landmarks that MediaPipe has had to extrapolate past the frame edge are
+    guesses, and a pose built out of guesses should not be trusted as much as
+    one built out of pixels. Scaling confidence by this is what stops a hand
+    half out of shot from firing commands.
+    """
+    xy = landmarks[:, :2]
+    inside = (
+        (xy[:, 0] > margin) & (xy[:, 0] < 1.0 - margin)
+        & (xy[:, 1] > margin) & (xy[:, 1] < 1.0 - margin)
+    )
+    return float(inside.mean())
+
+
+def extract(hand: HandFrame, cfg: GestureConfig, aspect: float = 16 / 9,
+            edge_margin: float = 0.02) -> HandFeatures:
     w = hand.world
     lm = hand.landmarks
 
@@ -161,9 +179,81 @@ def extract(hand: HandFrame, cfg: GestureConfig, aspect: float = 16 / 9) -> Hand
         hand_axis=axis,
         index_dir=index_dir,
         thumb_dir=thumb_dir,
+        quality=frame_quality(lm, edge_margin),
         index_tip=index_tip,
         palm_center=palm_center,
         pinch_point=pinch_point,
         extended_count=sum(extended.values()),
         raw=hand,
     )
+
+
+class FeatureSmoother:
+    """Exponential smoothing of the scalars the classifier reads.
+
+    The voting window in the stabiliser already rejects single bad frames, but
+    it does so by throwing whole classifications away. Smoothing the underlying
+    measurements instead means a noisy frame nudges the answer rather than
+    contradicting it, which both raises accuracy and lets the voting window stay
+    short -- and a short window is what keeps the system feeling responsive.
+
+    State is per hand, and resets when a hand leaves and comes back rather than
+    interpolating across the gap.
+    """
+
+    SCALARS = (
+        "thumb_curl", "thumb_abduction", "pinch", "spread", "index_reach",
+        "index_middle_tip_gap", "index_middle_mcp_gap", "palm_facing", "quality",
+    )
+    VECTORS = ("index_dir", "thumb_dir", "hand_axis")
+
+    def __init__(self, tau: float = 0.075, reset_gap: float = 0.35):
+        self.tau = tau
+        self.reset_gap = reset_gap
+        self._state: Dict[str, Dict] = {}
+        self._last_seen: Dict[str, float] = {}
+
+    def reset(self) -> None:
+        self._state.clear()
+        self._last_seen.clear()
+
+    def __call__(self, f: HandFeatures, now: float, cfg: GestureConfig) -> HandFeatures:
+        key = f.label
+        last = self._last_seen.get(key)
+        self._last_seen[key] = now
+        if last is None or now - last > self.reset_gap or now < last:
+            self._state[key] = self._snapshot(f)
+            return f
+
+        dt = max(now - last, 1e-4)
+        alpha = dt / (self.tau + dt)
+        prev = self._state.get(key)
+        if prev is None:
+            self._state[key] = self._snapshot(f)
+            return f
+
+        for name in self.SCALARS:
+            setattr(f, name, prev[name] + alpha * (getattr(f, name) - prev[name]))
+        for name, value in f.curls.items():
+            f.curls[name] = prev["curls"][name] + alpha * (value - prev["curls"][name])
+        for name in self.VECTORS:
+            blended = prev[name] + alpha * (getattr(f, name) - prev[name])
+            setattr(f, name, _unit(blended))
+
+        # Everything derived from the smoothed values has to be recomputed.
+        f.extended = {n: c < cfg.finger_extended_max_curl for n, c in f.curls.items()}
+        f.extended_count = sum(f.extended.values())
+        f.thumb_extended = (
+            f.thumb_curl < cfg.thumb_extended_max_curl
+            and f.thumb_abduction > cfg.thumb_abduction_min
+        )
+
+        self._state[key] = self._snapshot(f)
+        return f
+
+    def _snapshot(self, f: HandFeatures) -> Dict:
+        snap: Dict = {name: float(getattr(f, name)) for name in self.SCALARS}
+        snap["curls"] = dict(f.curls)
+        for name in self.VECTORS:
+            snap[name] = np.array(getattr(f, name), dtype=float)
+        return snap

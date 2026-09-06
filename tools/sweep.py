@@ -95,12 +95,13 @@ def run(samples: int, strength: float, noise: float, seed: int, verbose: bool,
 
 
 def run_stream(streams: int, strength: float, noise: float, seed: int, frames: int,
-               min_conf: float) -> int:
+               min_conf: float, smoothing: bool = True) -> int:
     """End-to-end check: hold each gesture for `frames` frames and see what the
     stabiliser settles on. This is the number that matters in use -- the
     per-frame figures ignore the voting window that sits in front of the canvas.
     """
-    from vision_paint.config import StabilizerConfig
+    from vision_paint.config import StabilizerConfig, TrackerConfig
+    from vision_paint.features import FeatureSmoother
     from vision_paint.stabilizer import GestureStabilizer
 
     rng = np.random.default_rng(seed)
@@ -115,6 +116,7 @@ def run_stream(streams: int, strength: float, noise: float, seed: int, frames: i
     for name, spec in POSES.items():
         for _ in range(streams):
             stab = GestureStabilizer(scfg)
+            smoother = FeatureSmoother(TrackerConfig().feature_smoothing) if smoothing else None
             base, expected = jitter(spec, name, rng, strength * 0.6)
             saw_right = False
             saw_wrong: List[str] = []
@@ -124,7 +126,10 @@ def run_stream(streams: int, strength: float, noise: float, seed: int, frames: i
                 # Re-jitter lightly each frame: the hand is held, not frozen.
                 s, _ = jitter(base, expected, rng, strength * 0.35)
                 s.geometric_label = base.geometric_label
-                result = clf.classify(extract(build_frame(s, noise=noise, rng=rng), cfg), min_conf)
+                f = extract(build_frame(s, noise=noise, rng=rng), cfg)
+                if smoother is not None:
+                    f = smoother(f, t, cfg)
+                result = clf.classify(f, min_conf)
                 state = stab.update(result.gesture, result.confidence, t)
                 if state.changed and state.active:
                     if state.gesture.value == expected:
@@ -147,7 +152,8 @@ def run_stream(streams: int, strength: float, noise: float, seed: int, frames: i
     print(f"\nstabilised: {sum(settled.values()) / total:.1%} settled on the right gesture, "
           f"{sum(silent.values()) / total:.1%} never settled, "
           f"{sum(wrong.values()) / total:.1%} settled on something wrong "
-          f"({frames}-frame holds, jitter x{strength}, noise {noise * 1000:.0f} mm)")
+          f"({frames}-frame holds, jitter x{strength}, noise {noise * 1000:.0f} mm, "
+          f"feature smoothing {'on' if smoothing else 'off'})")
     return 0
 
 
@@ -158,13 +164,16 @@ def main() -> int:
     ap.add_argument("--noise", type=float, default=0.0025, help="landmark noise, metres")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--min-conf", type=float, default=0.55)
+    ap.add_argument("--no-smoothing", action="store_true",
+                    help="stream mode: bypass the feature smoother, for A/B")
     ap.add_argument("--stream", action="store_true",
                     help="evaluate held gestures through the temporal stabiliser")
     ap.add_argument("--frames", type=int, default=20, help="frames per held gesture")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
     if a.stream:
-        return run_stream(a.samples, a.strength, a.noise, a.seed, a.frames, a.min_conf)
+        return run_stream(a.samples, a.strength, a.noise, a.seed, a.frames, a.min_conf,
+                          smoothing=not a.no_smoothing)
     return run(a.samples, a.strength, a.noise, a.seed, a.verbose, a.min_conf)
 
 

@@ -45,6 +45,32 @@ class Rig:
             self.dispatcher.update([hand], self.t)
         return self
 
+    def aim(self, pose, attribute, target):
+        """The frame centre that puts a given landmark at a given screen point.
+
+        Tests care where the fingertips are, not where the synthetic hand's
+        origin is, so they aim by the landmark that actually does the work.
+        """
+        hand = extract(build_frame(POSES[pose], center=(0.5, 0.5)), self.cfg.gesture, 16 / 9)
+        off = np.asarray(getattr(hand, attribute)) - np.array([0.5, 0.5])
+        return (target[0] - off[0], target[1] - off[1])
+
+    def screen_of(self, group):
+        """Where a board group sits on screen, in normalised coordinates."""
+        canvas = self.state.canvas
+        x0, y0, x1, y1 = group.bounds
+        sx, sy = canvas.board_to_screen((x0 + x1) / 2, (y0 + y1) / 2)
+        return (sx / canvas.width, sy / canvas.height)
+
+    def grab_drag(self, frm, to, settle=0.45, drag=0.7):
+        """Pinch at `frm`, then drag to `to`, both normalised screen points."""
+        start = self.aim("pinch", "pinch_point", frm)
+        end = self.aim("pinch", "pinch_point", to)
+        self.hold("pinch", settle, center=start, pinch=lambda f: 0.2)
+        self.hold("pinch", drag, center=start,
+                  move=(end[0] - start[0], end[1] - start[1]), pinch=lambda f: 0.2)
+        return self
+
     def blank(self, seconds=0.4):
         for _ in range(int(seconds / DT)):
             self.t += DT
@@ -182,8 +208,10 @@ def test_holding_a_pointing_gesture_repeats(rig):
 def test_three_and_four_fingers_change_style_and_background(rig):
     rig.hold("three_fingers", 0.6).blank()
     assert rig.state.style == rig.cfg.canvas.brush_styles[1]
+    before = rig.state.canvas.background_index
     rig.hold("four_fingers", 0.6).blank()
-    assert rig.state.canvas.background_index == 1
+    expected = (before + 1) % len(rig.cfg.canvas.backgrounds)
+    assert rig.state.canvas.background_index == expected
 
 
 def test_menu_opens_navigates_and_confirms(rig):
@@ -219,3 +247,76 @@ def test_each_canvas_keeps_its_own_drawing(rig):
     assert len(rig.state.canvas.strokes) == 1
     rig.hold("two_fingers", 0.45, center=(0.7, 0.5), move=(-0.4, 0.0)).blank()
     assert len(rig.state.canvas.strokes) == 1
+
+
+# ---- whiteboard: moving drawings around ----------------------------------
+
+
+def test_a_drawing_can_be_grabbed_and_moved_aside(rig):
+    """The headline interaction: shove what you drew out of the way."""
+    rig.hold("draw", 0.8, center=(0.62, 0.45), move=(0.12, 0.08)).blank()
+    group = rig.state.canvas.groups()[0]
+    before = group.bounds
+    where = rig.screen_of(group)
+
+    rig.grab_drag(where, (where[0] - 0.30, where[1])).blank()
+
+    after = rig.state.canvas.groups()[0].bounds
+    assert after[0] < before[0] - 100, "drawing did not move left"
+    assert abs(after[1] - before[1]) < 60, "drawing drifted vertically"
+
+
+def test_moving_a_drawing_frees_the_space_for_a_new_one(rig):
+    """Move the first drawing aside, draw another, and get two drawings."""
+    rig.hold("draw", 0.8, center=(0.62, 0.45), move=(0.10, 0.06)).blank()
+    where = rig.screen_of(rig.state.canvas.groups()[0])
+    rig.grab_drag(where, (where[0] - 0.34, where[1])).blank()
+
+    rig.hold("draw", 0.8, center=(0.62, 0.45), move=(0.10, 0.06)).blank()
+
+    groups = rig.state.canvas.groups()
+    assert len(groups) == 2, f"expected two separate drawings, got {len(groups)}"
+
+
+def test_grabbing_empty_space_pans_the_board_instead(rig):
+    rig.hold("draw", 0.7, center=(0.30, 0.30), move=(0.06, 0.04)).blank()
+    stroke_offsets = [np.array(s.offset) for s in rig.state.canvas.strokes]
+
+    rig.grab_drag((0.80, 0.80), (0.55, 0.80)).blank()
+
+    assert rig.state.canvas.pan[0] != pytest.approx(0.0, abs=1e-3), "board did not pan"
+    for stroke, before in zip(rig.state.canvas.strokes, stroke_offsets):
+        assert np.asarray(stroke.offset) == pytest.approx(before), "panning moved the ink"
+
+
+def test_a_move_can_be_undone_by_gesture(rig):
+    rig.hold("draw", 0.8, center=(0.62, 0.45), move=(0.10, 0.06)).blank()
+    before = rig.state.canvas.groups()[0].bounds
+    where = rig.screen_of(rig.state.canvas.groups()[0])
+    rig.grab_drag(where, (where[0] - 0.28, where[1])).blank()
+    assert rig.state.canvas.groups()[0].bounds[0] < before[0] - 90
+
+    rig.hold("crossed_fingers", 0.5).blank()
+    assert rig.state.canvas.groups()[0].bounds == pytest.approx(before, abs=2)
+
+
+def test_a_pinch_that_never_moves_still_selects_a_tool(rig):
+    """The grab machine must not swallow the still-hand reading."""
+    rig.hold("pinch", 1.0, center=(0.80, 0.80), pinch=lambda f: 0.2).blank()
+    assert rig.state.tool == rig.cfg.canvas.tools[1]
+    assert rig.state.canvas.pan[0] == pytest.approx(0.0)
+
+
+def test_grabbing_never_starts_a_stroke(rig):
+    rig.hold("draw", 0.7, center=(0.62, 0.45), move=(0.08, 0.05)).blank()
+    count = len(rig.state.canvas.strokes)
+    where = rig.screen_of(rig.state.canvas.groups()[0])
+    rig.grab_drag(where, (where[0] - 0.2, where[1])).blank()
+    assert len(rig.state.canvas.strokes) == count
+
+
+def test_drawing_is_smoothed_into_a_curve(rig):
+    """Ink is rendered through the smoother, not as the raw sample polyline."""
+    rig.hold("draw", 1.0, center=(0.35, 0.5), move=(0.3, 0.1)).blank()
+    stroke = rig.state.canvas.strokes[0]
+    assert len(stroke.render_points()) > len(stroke.points)

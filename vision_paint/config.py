@@ -34,10 +34,22 @@ class TrackerConfig:
     min_detection_confidence: float = 0.6
     min_presence_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
-    # One Euro filter: lower min_cutoff = smoother but laggier.
+    # One Euro filter on the landmarks: lower min_cutoff = smoother but laggier.
     filter_min_cutoff: float = 1.2
     filter_beta: float = 0.06
     filter_d_cutoff: float = 1.0
+    # A second, gentler filter on the drawing point alone. Ink shows every bit
+    # of tremor the landmarks carry, so the pen wants more smoothing than the
+    # pose recognition does -- and recognition wants the responsiveness back.
+    draw_min_cutoff: float = 0.55
+    draw_beta: float = 0.035
+    # Exponential smoothing time constant for the scalar features that feed the
+    # classifier, in seconds. Averages out single-frame landmark noise without
+    # the lag a longer voting window would add.
+    feature_smoothing: float = 0.075
+    # Hands whose landmarks run past the frame edge are badly conditioned; their
+    # confidence is scaled down rather than trusted at face value.
+    edge_margin: float = 0.02
 
 
 @dataclass
@@ -103,11 +115,33 @@ class MotionConfig:
     # Pinch-zoom: change in pinch aperture per second to register.
     zoom_min_delta: float = 0.05
     zoom_gain: float = 2.2
+    # Grab-and-drag: how far a pinched hand must travel (fraction of screen
+    # width) before the pinch is read as a drag rather than a held pose.
+    grab_min_distance: float = 0.035
+    # How long a pinch waits before it can settle into "held still" and cycle
+    # the tool. Long enough that reaching for a drawing is never mistaken for it.
+    grab_intent_seconds: float = 0.28
 
 
 @dataclass
 class CanvasConfig:
     num_canvases: int = 4
+    # The board is bigger than the window, which is the whole point of being
+    # able to shove a drawing aside: there is somewhere to shove it to.
+    board_scale: float = 2.0
+    # Strokes whose bounding boxes come this close are treated as one drawing.
+    # Expressed as a fraction of the viewport width, because how far apart
+    # people leave their strokes scales with how big the board looks to them,
+    # not with a pixel count.
+    group_gap_ratio: float = 0.060
+    # How far from a drawing a pinch still counts as grabbing it, same units.
+    grab_reach_ratio: float = 0.075
+    # Minimum spacing between recorded stroke points, in board pixels.
+    point_spacing: float = 2.5
+    # Board rulings, in board pixels. 0 disables them.
+    grid_spacing: int = 64
+    grid_backgrounds: Tuple[str, ...] = ("light", "paper", "dark", "slate")
+    default_background: int = 2   # start on the light whiteboard, not the camera
     brush_sizes: Tuple[int, ...] = (3, 6, 10, 16, 24, 36, 52)
     default_brush_index: int = 2
     eraser_scale: float = 3.0
@@ -126,7 +160,7 @@ class CanvasConfig:
     backgrounds: Tuple[Tuple[str, BGR], ...] = (
         ("camera", (0, 0, 0)),
         ("dark", (24, 24, 28)),
-        ("light", (242, 242, 245)),
+        ("light", (246, 246, 248)),
         ("slate", (60, 52, 44)),
         ("paper", (214, 226, 238)),
     )
