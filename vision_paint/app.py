@@ -145,6 +145,14 @@ class VisionPaint:
         elif key == ord("r"):
             self.state.canvas.reset_view()
             self.state.notify("View reset")
+        elif key in (ord("+"), ord("=")):
+            canvas = self.state.canvas
+            canvas.set_zoom(canvas.zoom * 1.15)
+            self.state.notify(f"Zoom {canvas.zoom:.2f}x")
+        elif key in (ord("-"), ord("_")):
+            canvas = self.state.canvas
+            canvas.set_zoom(canvas.zoom / 1.15)
+            self.state.notify(f"Zoom {canvas.zoom:.2f}x")
         return None
 
 

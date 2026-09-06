@@ -192,7 +192,7 @@ def draw_hud(frame: np.ndarray, state: AppState, gesture_label: str, confidence:
     cv2.rectangle(frame, (bar_x, 16), (bar_x + 120, 28), theme.dim, 1)
     cv2.rectangle(frame, (bar_x, 16), (bar_x + int(120 * confidence), 28), theme.good, -1)
 
-    mode_label = {"grab": "MOVING", "pan": "PANNING", "zoom": "ZOOMING"}.get(pinch_mode or "")
+    mode_label = {"grab": "MOVING", "pan": "PANNING"}.get(pinch_mode or "")
     if mode_label:
         text(mode_label, bar_x + 136, 29, 0.5, theme.good, 2)
 
@@ -287,8 +287,8 @@ HELP_LINES = (
     ("index finger", "draw"),
     ("pinch a drawing + move", "pick it up, move it"),
     ("pinch empty space + move", "pan the board"),
-    ("pinch open/close", "zoom"),
     ("pinch, hold still", "select tool"),
+    ("both hands pinched + apart", "zoom in / out"),
     ("two fingers, hold still", "next colour"),
     ("two fingers + swipe", "change board"),
     ("closed fist", "erase"),
@@ -309,13 +309,15 @@ HELP_LINES = (
 
 def draw_help(frame: np.ndarray, theme: Theme = DARK_THEME) -> None:
     h, w = frame.shape[:2]
-    pw, ph = 450, 24 * len(HELP_LINES) + 86
+    pw, ph = 486, 24 * len(HELP_LINES) + 100
     x, y = (w - pw) // 2, (h - ph) // 2
     _panel(frame, x, y, pw, ph, min(0.96, theme.panel_alpha + 0.25), theme)
     _text(frame, "GESTURES", x + 20, y + 34, 0.7, theme.accent, 2, theme.outline)
     for i, (gesture, action) in enumerate(HELP_LINES):
         row = y + 60 + i * 24
         _text(frame, gesture, x + 20, row, 0.46, theme.text, 1, theme.outline)
-        _text(frame, action, x + 250, row, 0.46, theme.dim, 1, theme.outline)
-    _text(frame, "h close   q quit   d debug   l landmarks   r reset view",
-          x + 20, y + ph - 18, 0.42, theme.dim, 1, theme.outline)
+        _text(frame, action, x + 262, row, 0.46, theme.dim, 1, theme.outline)
+    _text(frame, "h close   q quit   z undo   c clear   s save",
+          x + 20, y + ph - 36, 0.42, theme.dim, 1, theme.outline)
+    _text(frame, "d debug   l landmarks   r reset view   +/- zoom",
+          x + 20, y + ph - 16, 0.42, theme.dim, 1, theme.outline)

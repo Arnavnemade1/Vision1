@@ -112,9 +112,11 @@ class MotionConfig:
     swipe_min_distance: float = 0.16
     # Static gestures only fire when the hand is slower than this.
     static_max_speed: float = 0.28
-    # Pinch-zoom: change in pinch aperture per second to register.
-    zoom_min_delta: float = 0.05
-    zoom_gain: float = 2.2
+    # Two-handed zoom: the span between the two pinch points is compared with
+    # the span when the gesture started, so zoom tracks the hands absolutely
+    # rather than integrating a rate. Spans below this are too small for the
+    # ratio to be stable.
+    two_hand_zoom_min_span: float = 0.06
     # Grab-and-drag: how far a pinched hand must travel (fraction of screen
     # width) before the pinch is read as a drag rather than a held pose.
     grab_min_distance: float = 0.035

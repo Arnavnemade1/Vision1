@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -42,6 +42,7 @@ class Gesture(str, Enum):
     OK_SIGN = "ok_sign"
     CALL_ME = "call_me"                # thumb + little finger
     PRAYER = "prayer"                  # both hands together (two-hand gesture)
+    PINCH_SPREAD = "pinch_spread"      # both hands pinched, moved apart/together
 
 
 #: Gestures that only make sense while a single hand is visible and still.
@@ -224,17 +225,30 @@ class GestureClassifier:
         return Classification(best, score, ranking)
 
 
-def classify_two_hands(
-    a: HandFeatures, b: HandFeatures, cfg: GestureConfig
-) -> Tuple[Gesture, float]:
-    """Palms pressed together — the exit gesture.
+def _pinch_score(f: HandFeatures, cfg: GestureConfig) -> float:
+    """How convincingly one hand is holding a pinch.
+
+    The same predicates as the single-hand PINCH rule, minus the parts that
+    only matter for telling a pinch from a fist in isolation.
+    """
+    pinched = _ramp(f.pinch, cfg.pinch_close_max * 0.6, cfg.pinch_open_min)
+    held_out = _ramp(f.index_reach, cfg.fist_index_reach_max + 0.13,
+                     cfg.fist_index_reach_max - 0.11)
+    folded = [
+        1.0 - _ramp(f.curls[n], cfg.finger_extended_max_curl, cfg.finger_folded_min_curl)
+        for n in ("middle", "ring", "pinky")
+    ]
+    return _combine([pinched, held_out] + folded)
+
+
+def _prayer_score(a: HandFeatures, b: HandFeatures, cfg: GestureConfig) -> float:
+    """Palms pressed together.
 
     Judged from image-space geometry: the two palms sit close relative to hand
     size, and both hands point roughly the same way (fingers up, edge-on to the
     camera) rather than one hand simply passing in front of the other.
     """
     gap = float(np.linalg.norm(a.palm_center - b.palm_center))
-    scale = 0.5 * (a.hand_size + b.hand_size)
     # Palm centres are image-normalised while hand_size is metric, so compare
     # against the on-screen span of the index knuckles instead.
     span = max(
@@ -244,12 +258,37 @@ def classify_two_hands(
     )
     closeness = _ramp(gap / span, 0.85, 2.1)
     aligned = _ramp(float(np.dot(a.hand_axis, b.hand_axis)), 0.85, 0.35)
-    upright = _combine([_ramp(float(a.hand_axis[1]), 0.85, 0.2), _ramp(float(b.hand_axis[1]), 0.85, 0.2)])
-    fingers_out = _combine(
-        [
-            _ramp(a.curls["middle"], cfg.finger_extended_max_curl, cfg.finger_folded_min_curl),
-            _ramp(b.curls["middle"], cfg.finger_extended_max_curl, cfg.finger_folded_min_curl),
-        ]
-    )
-    del scale
-    return Gesture.PRAYER, _combine([closeness, aligned, upright, fingers_out])
+    upright = _combine([
+        _ramp(float(a.hand_axis[1]), 0.85, 0.2),
+        _ramp(float(b.hand_axis[1]), 0.85, 0.2),
+    ])
+    fingers_out = _combine([
+        _ramp(a.curls["middle"], cfg.finger_extended_max_curl, cfg.finger_folded_min_curl),
+        _ramp(b.curls["middle"], cfg.finger_extended_max_curl, cfg.finger_folded_min_curl),
+    ])
+    return _combine([closeness, aligned, upright, fingers_out])
+
+
+def two_hand_scores(
+    a: HandFeatures, b: HandFeatures, cfg: GestureConfig
+) -> Dict[Gesture, float]:
+    """Score every two-handed gesture.
+
+    Two hands are what separates zoom from grab. Both are pinches -- that is
+    what makes pinch-to-zoom feel right in the first place -- so they are told
+    apart by how many hands are doing it rather than by asking one hand to mean
+    two things at once.
+    """
+    return {
+        Gesture.PRAYER: _prayer_score(a, b, cfg),
+        Gesture.PINCH_SPREAD: _combine([_pinch_score(a, cfg), _pinch_score(b, cfg)]),
+    }
+
+
+def classify_two_hands(
+    a: HandFeatures, b: HandFeatures, cfg: GestureConfig
+) -> Tuple[Gesture, float]:
+    """The best-scoring two-handed gesture and its confidence."""
+    scores = two_hand_scores(a, b, cfg)
+    gesture = max(scores, key=lambda g: scores[g])
+    return gesture, scores[gesture]

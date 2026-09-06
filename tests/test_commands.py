@@ -77,6 +77,23 @@ class Rig:
             self.dispatcher.update([], self.t)
         return self
 
+    def two_hand_pinch(self, span_from, span_to, seconds=1.0):
+        """Both hands pinched, moving apart or together -- the zoom gesture."""
+        frames = max(1, int(seconds / DT))
+        left = deepcopy(POSES["pinch"])
+        right = deepcopy(POSES["pinch"])
+        right.geometric_label = "Left"
+        for i in range(frames):
+            self.t += DT
+            f = i / max(1, frames - 1)
+            span = span_from + (span_to - span_from) * f
+            a = extract(build_frame(left, center=(0.5 - span / 2, 0.5)),
+                        self.cfg.gesture, 16 / 9)
+            b = extract(build_frame(right, center=(0.5 + span / 2, 0.5)),
+                        self.cfg.gesture, 16 / 9)
+            self.dispatcher.update([a, b], self.t)
+        return self
+
     def two_hands(self, seconds=2.0, gap=0.08):
         left = deepcopy(POSES["palm_flat"])
         right = deepcopy(POSES["palm_flat"])
@@ -136,16 +153,40 @@ def test_pinch_held_still_selects_the_next_tool(rig):
     assert rig.state.canvas.zoom == 1.0
 
 
-def test_opening_the_pinch_zooms_instead_of_selecting(rig):
-    rig.hold("pinch", 0.9, pinch=lambda f: 0.16 + 0.2 * f).blank()
-    assert rig.state.canvas.zoom > 1.05
-    assert rig.state.tool == rig.cfg.canvas.tools[0]
+def test_two_pinched_hands_moving_apart_zoom_in(rig):
+    rig.two_hand_pinch(0.16, 0.42).blank()
+    assert rig.state.canvas.zoom > 1.3
 
 
-def test_closing_the_pinch_zooms_out(rig):
-    rig.state.canvas.set_zoom(2.0)
-    rig.hold("pinch", 0.9, pinch=lambda f: 0.36 - 0.2 * f).blank()
-    assert rig.state.canvas.zoom < 1.95
+def test_two_pinched_hands_moving_together_zoom_out(rig):
+    rig.state.canvas.set_zoom(3.0)
+    rig.two_hand_pinch(0.42, 0.16).blank()
+    assert rig.state.canvas.zoom < 2.0
+
+
+def test_one_hand_changing_its_pinch_no_longer_zooms(rig):
+    """Zoom and grab shared the pinch and made each other unreliable. Opening
+    and closing one hand must now do nothing to the view at all."""
+    rig.hold("pinch", 1.2, center=(0.8, 0.8), pinch=lambda f: 0.16 + 0.22 * f).blank()
+    assert rig.state.canvas.zoom == pytest.approx(1.0)
+
+
+def test_two_hand_zoom_is_absolute_not_accumulated(rig):
+    """Hands out and back again should land where it started, not drift."""
+    rig.two_hand_pinch(0.20, 0.40, seconds=0.9)
+    out = rig.state.canvas.zoom
+    rig.two_hand_pinch(0.40, 0.20, seconds=0.9).blank()
+    assert out > 1.2
+    assert rig.state.canvas.zoom == pytest.approx(1.0, abs=0.12)
+
+
+def test_zooming_does_not_move_any_drawing(rig):
+    rig.hold("draw", 0.7, center=(0.35, 0.4), move=(0.08, 0.05)).blank()
+    offsets = [np.array(s.offset) for s in rig.state.canvas.strokes]
+    rig.two_hand_pinch(0.16, 0.40).blank()
+    assert rig.state.canvas.zoom > 1.2
+    for stroke, before in zip(rig.state.canvas.strokes, offsets):
+        assert np.asarray(stroke.offset) == pytest.approx(before)
 
 
 def test_open_palm_clears_only_after_the_hold(rig):

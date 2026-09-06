@@ -4,15 +4,21 @@ The binding table below is the contract between the recognition half of the
 system and the drawing half. Two gestures are context-sensitive and resolved
 against what the hand is doing rather than its shape alone:
 
-  two fingers  held still -> next colour   swiped sideways -> change canvas
+  two fingers  held still -> next colour   swiped sideways -> change board
   pinch        held still -> next tool     moved -> grab a drawing, or pan the
                                            board if the pinch caught nothing
-                                           opened/closed -> zoom
 
-A pinch commits to one of those four readings within the first fraction of a
-second and keeps it until the hand opens again. Locking the mode up front is
-what makes dragging a drawing feel like holding an object: once you have hold
-of something, wobbling your fingers cannot turn the drag into a zoom.
+Zoom is deliberately not on that list. It used to be -- a pinch that opened or
+closed -- and sharing one gesture with grabbing made both unreliable, since
+holding something still and changing the gap between your fingers are hard to
+keep separate by accident. Zoom moved to a two-handed pinch, which is the
+gesture everyone already knows from a touchscreen and which no single-handed
+pose can be mistaken for. One hand pinching now means exactly one thing: hold
+something.
+
+A pinch commits to one reading within the first fraction of a second and keeps
+it until the hand opens again, so once you have hold of a drawing, a wobble
+cannot turn the drag into a pan.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ def build_bindings(cfg: AppConfig) -> Dict[Gesture, Binding]:
     dwell = cfg.stabilizer.destructive_dwell
     table = (
         Binding(Gesture.TWO_FINGERS, "Change colour", dwell=0.30, needs_still=True),
-        Binding(Gesture.PINCH, "Grab / tool", dwell=0.35, needs_still=True),
+        Binding(Gesture.PINCH, "Grab / move", dwell=0.35, needs_still=True),
         Binding(Gesture.OPEN_PALM, "Clear screen", dwell=dwell, destructive=True),
         Binding(Gesture.THUMBS_UP, "Save drawing", cooldown=1.2),
         Binding(Gesture.THUMBS_DOWN, "Delete drawing", dwell=dwell, destructive=True),
@@ -98,12 +104,14 @@ class CommandDispatcher:
         self._last_now = 0.0
 
         # Pinch manipulation state, all reset on each new pinch press.
-        self.pinch_mode: Optional[str] = None      # grab | pan | zoom | tool
+        self.pinch_mode: Optional[str] = None      # grab | pan
         self.hover_group = None                    # what a pinch would pick up
         self.grabbed_group = None                  # what a pinch is holding
         self._grab_anchor: Optional[np.ndarray] = None
         self._grab_last_board: Optional[np.ndarray] = None
         self._grab_total = np.zeros(2)
+        self._zoom_span: Optional[float] = None    # two-hand zoom reference span
+        self._zoom_base = 1.0
 
     # ---- helpers ----------------------------------------------------------
 
@@ -135,6 +143,7 @@ class CommandDispatcher:
 
         if len(hands) < 2:
             self.two_hand_stabilizer.update(Gesture.NONE, 0.0, now)
+            self._zoom_span = None
 
         if not hands:
             self._end_stroke()
@@ -142,6 +151,7 @@ class CommandDispatcher:
             self.stabilizer.update(Gesture.NONE, 0.0, now)
             self.motion.reset()
             self.pen.reset()
+            self._zoom_span = None
             self.cursor = None
             self.hover_group = None
             self.dwell_progress = 0.0
@@ -197,7 +207,7 @@ class CommandDispatcher:
         if state.gesture is Gesture.TWO_FINGERS and self._handle_canvas_swipe(now):
             return
         if state.gesture is Gesture.PINCH:
-            if self._handle_pinch(hand, state, motion, dt):
+            if self._handle_pinch(hand, state):
                 return
 
         if binding.needs_still and (self._dynamic_used or not self.motion.is_still):
@@ -252,8 +262,8 @@ class CommandDispatcher:
         self.state.notify(f"Canvas {canvas.name} of {len(self.state.canvases.canvases)}", "good")
         return True
 
-    def _handle_pinch(self, hand: HandFeatures, state, motion, dt: float) -> bool:
-        """Grab, pan, zoom or select -- decided once per pinch, then held.
+    def _handle_pinch(self, hand: HandFeatures, state) -> bool:
+        """Grab, pan or select -- decided once per pinch, then held.
 
         Returns True when the pinch has been consumed as a manipulation, which
         leaves the generic binding path (tool cycling) for the case where the
@@ -278,9 +288,7 @@ class CommandDispatcher:
             # fingers first closed.
             self.hover_group = canvas.group_at(board[0], board[1])
 
-            if abs(motion.pinch_rate) >= cfg.zoom_min_delta:
-                self.pinch_mode = "zoom"
-            elif travel >= cfg.grab_min_distance:
+            if travel >= cfg.grab_min_distance:
                 if self.hover_group is not None:
                     self.pinch_mode = "grab"
                     self.grabbed_group = self.hover_group
@@ -296,12 +304,6 @@ class CommandDispatcher:
                 # Still deciding: hold the frame so a slow reach toward a
                 # drawing is not mistaken for a deliberate still pose.
                 return True
-
-        if self.pinch_mode == "zoom":
-            self._dynamic_used = True
-            canvas.set_zoom(canvas.zoom * (1.0 + motion.pinch_rate * cfg.zoom_gain * dt))
-            self.state.notify(f"Zoom {canvas.zoom:.2f}x")
-            return True
 
         if self.pinch_mode == "grab" and self.grabbed_group is not None:
             self._dynamic_used = True
@@ -345,16 +347,53 @@ class CommandDispatcher:
             gesture if score >= self.cfg.stabilizer.min_confidence else Gesture.NONE, score, now
         )
         if not state.active:
+            self._zoom_span = None
             return False
 
-        binding = self.bindings[Gesture.PRAYER]
         self.last_state = state
+        self._end_stroke()
+        self._release_grab()
+
+        if state.gesture is Gesture.PINCH_SPREAD:
+            self.dwell_progress = 0.0
+            self.dwell_label = ""
+            return self._handle_two_hand_zoom(hands, state)
+
+        binding = self.bindings[Gesture.PRAYER]
         self.dwell_progress = self.two_hand_gate.progress(state, binding.dwell)
         self.dwell_label = binding.label
-        self._end_stroke()
+        self.two_hand_gate.arm(state)
         if self.two_hand_gate.try_fire(state, now, binding.cooldown, binding.dwell):
             self.state.notify("Exiting", "warn")
             self.state.running = False
+        return True
+
+    def _handle_two_hand_zoom(self, hands: List[HandFeatures], state) -> bool:
+        """Pinch with both hands and move them apart or together.
+
+        Zoom tracks the ratio of the current span to the span when the gesture
+        started, the way a touchscreen does, rather than integrating a rate.
+        That makes it absolute: the same hand positions always give the same
+        zoom, so overshooting is corrected by moving back rather than by
+        waiting for a drift to stop.
+        """
+        canvas = self.state.canvas
+        aspect = canvas.width / max(canvas.height, 1)
+        a, b = hands[0].pinch_point, hands[1].pinch_point
+        span = float(np.hypot((a[0] - b[0]) * aspect, a[1] - b[1]))
+
+        if state.changed or self._zoom_span is None:
+            self._zoom_span = span
+            self._zoom_base = canvas.zoom
+            self.state.notify("Zooming", "good")
+            return True
+
+        if self._zoom_span < self.cfg.motion.two_hand_zoom_min_span:
+            self._zoom_span = span
+            return True
+
+        canvas.set_zoom(self._zoom_base * (span / self._zoom_span))
+        self.state.notify(f"Zoom {canvas.zoom:.2f}x")
         return True
 
     # ---- one-shot commands ------------------------------------------------

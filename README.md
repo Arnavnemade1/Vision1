@@ -30,6 +30,7 @@ initialize` and the app exits with a message saying so.
 | 🤏 Pinch **on a drawing**, then move | Pick that drawing up and move it |
 | 🤏 Pinch **empty space**, then move | Pan the board |
 | 🤏 Pinch, held still | Select tool (brush / line / rectangle / circle) |
+| 🤏🤏 **Both** hands pinched, move apart / together | Zoom in / out |
 | 🖐️ Open palm, fingers spread | Clear the board *(hold 1.4 s)* |
 | 👍 Thumbs up | Save drawing |
 | 👎 Thumbs down | Delete last save *(hold 1.4 s)* |
@@ -44,11 +45,11 @@ initialize` and the app exits with a message saying so.
 | 👌 OK sign | Confirm selection |
 | 🤙 Thumb + little finger | Open / close menu |
 | ✌️ + swipe left/right | Change board |
-| 🤏 + open/close the pinch | Zoom in / out |
 | 🙏 Both palms together | Exit *(hold 1.4 s)* |
 
 Keyboard shortcuts remain available: `h` help, `d` gesture score panel,
-`l` landmarks, `z` undo, `c` clear, `s` save, `r` reset view, `q` quit.
+`l` landmarks, `z` undo, `c` clear, `s` save, `r` reset view, `+`/`-` zoom,
+`q` quit.
 
 ### Three ambiguities in that list, and how they are resolved
 
@@ -62,12 +63,28 @@ shape alone. Each is separated by a second signal rather than by luck:
 2. **🖐️ clear screen vs ✋ pause.** Both are five fingers up. Finger spread
    decides: fanned out clears, held together pauses. Clearing also needs a
    1.4-second hold, so a misread cannot wipe a drawing instantly.
-3. **✌️ colour vs ✌️ + move, 🤏 tool vs 🤏 + grab / pan / zoom.** Movement
-   decides, and it gets first refusal. A pinch commits to one of four readings
-   within a fraction of a second and holds it until the hand opens, so once you
-   have hold of a drawing, wobbling your fingers cannot turn the drag into a
-   zoom. Pausing mid-pinch does *not* disqualify a grab — pinching, thinking,
-   then dragging is how people actually pick things up.
+3. **✌️ colour vs ✌️ + move, 🤏 tool vs 🤏 + grab / pan.** Movement decides,
+   and it gets first refusal. A pinch commits to one reading within a fraction
+   of a second and holds it until the hand opens, so once you have hold of a
+   drawing a wobble cannot turn the drag into a pan. Pausing mid-pinch does
+   *not* disqualify a grab — pinching, thinking, then dragging is how people
+   actually pick things up.
+
+### Why zoom is a two-handed gesture
+
+It used to be a one-handed one: a pinch that opened or closed. That put zoom
+and grab on the same gesture, and they interfere by construction — holding
+something still while your fingers drift apart slightly is not a thing people
+can reliably avoid doing. Whichever reading won, the other became unreliable.
+
+Zoom moved to a **two-handed pinch**, the gesture everyone already knows from a
+touchscreen. No single-handed pose can be mistaken for it, and it leaves one
+hand pinching to mean exactly one thing: hold something. It also became better
+zoom in the process — the span between the two pinch points is compared with
+the span when the gesture started, so it is absolute rather than an integrated
+rate. Overshoot is corrected by moving your hands back, not by waiting for a
+drift to stop. `+` and `-` on the keyboard do the same job when one hand is
+busy.
 
 ## Moving drawings around
 
